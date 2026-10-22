@@ -1,5 +1,16 @@
 import React, { useState } from 'react';
-import { DOWNPAYMENT, FB_URL, peso, peso2, fmtDate, fmtTime } from '../data/constants';
+import { DOWNPAYMENT, FB_URL, peso, fmtDate, fmtTime } from '../data/constants';
+
+const API_URL = 'http://localhost:5000';
+
+// Local money formatter (never shows NaN, always 2 decimals)
+const peso2 = (n) =>
+  '₱' + (Number(n) || 0).toLocaleString('en-PH', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+// Uses the constant from constants.js when it is a valid number, otherwise 500
+const DP_AMOUNT = Number(DOWNPAYMENT) || 500;
 
 export default function CartModal({
   isOpen,
@@ -13,6 +24,7 @@ export default function CartModal({
   const [dateMsg, setDateMsg] = useState({ text: '', isError: false });
   const [dateFull, setDateFull] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [qrError, setQrError] = useState(false);
 
   const [formData, setFormData] = useState({
@@ -28,7 +40,7 @@ export default function CartModal({
 
   if (!isOpen) return null;
 
-  const totalAmount = cart.reduce((s, i) => s + i.price, 0);
+  const totalAmount = cart.reduce((s, i) => s + (Number(i.price) || 0), 0);
   const minDate = new Date().toISOString().slice(0, 10);
 
   const handleInputChange = (e) => {
@@ -39,7 +51,7 @@ export default function CartModal({
     if (!date) return;
     setDateMsg({ text: '⏳ Checking date availability...', isError: false });
     try {
-      const res = await fetch('/api/availability?date=' + date);
+      const res = await fetch(`${API_URL}/api/availability?date=${date}`);
       const r = await res.json();
       const full = !!r.full;
       setDateFull(full);
@@ -62,51 +74,69 @@ export default function CartModal({
     if (dateFull || !cart.length) return;
     setSubmitting(true);
 
-    let id = '';
-    let total = totalAmount;
-
     try {
-      const res = await fetch('/api/orders', {
+      const res = await fetch(`${API_URL}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...formData,
+          subtotal: totalAmount,
           items: cart.map(i => ({ pkgId: i.pkgId, qty: i.qty, flavors: i.flavors }))
         })
       });
       const d = await res.json();
-      if (d.success) {
-        id = d.orderId;
-        total = d.total;
+
+      if (!d.success) {
+        onShowToast('Could not save your order. Please try again. ⚠️');
+        setSubmitting(false);
+        return;
       }
-    } catch (_) {}
 
-    if (!id) id = 'ORD-' + (100000 + Math.floor(Math.random() * 900000));
+      const orderObj = {
+        id: d.orderId,
+        total: Number(d.total ?? totalAmount),
+        ...formData,
+        issued: new Date(),
+        items: cart.map(i => ({ name: i.name, flavors: [...i.flavors], price: i.price }))
+      };
 
-    const orderObj = {
-      id,
-      total,
-      ...formData,
-      issued: new Date(),
-      items: cart.map(i => ({ name: i.name, flavors: [...i.flavors], price: i.price }))
-    };
+      setLastOrder(orderObj);
+      setStep(3);
+    } catch (_) {
+      onShowToast("Could not reach the server. Make sure 'node server.js' is running. ⚠️");
+    }
 
-    setLastOrder(orderObj);
     setSubmitting(false);
-    setStep(3);
   };
 
   const handleConfirmPaid = async () => {
-    if (!lastOrder) return;
+    if (!lastOrder || confirming) return;
+    setConfirming(true);
+
     try {
-      await fetch(`/api/orders/${lastOrder.id}/paid`, {
+      const res = await fetch(`${API_URL}/api/orders/${lastOrder.id}/paid`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reference: '' })
+        body: JSON.stringify({
+          reference: '',
+          downpayment: Math.min(DP_AMOUNT, lastOrder.total)
+        })
       });
-    } catch (_) {}
+      const d = await res.json();
+
+      if (!d.success) {
+        onShowToast('Could not record your downpayment. Please try again. ⚠️');
+        setConfirming(false);
+        return;
+      }
+    } catch (_) {
+      onShowToast("Could not reach the server. Make sure 'node server.js' is running. ⚠️");
+      setConfirming(false);
+      return;
+    }
 
     onClearCart();
+    setConfirming(false);
     setStep(4);
   };
 
@@ -115,8 +145,9 @@ export default function CartModal({
     onShowToast(`Copied ${label} to clipboard! 📋`);
   };
 
-  const dp = Math.min(DOWNPAYMENT, lastOrder ? lastOrder.total : totalAmount);
-  const bal = lastOrder ? lastOrder.total - dp : 0;
+  const orderTotal = lastOrder ? Number(lastOrder.total) || 0 : totalAmount;
+  const dp = Math.min(DP_AMOUNT, orderTotal);
+  const bal = Math.max(orderTotal - dp, 0);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -146,7 +177,7 @@ export default function CartModal({
         {step === 1 && (
           <div className="step-content">
             <h2 className="modal-title">🛒 Shopping Cart</h2>
-            
+
             {cart.length === 0 ? (
               <div className="empty-cart-view">
                 <p>Your cart is empty. Tap a food cart box to start your order!</p>
@@ -196,7 +227,7 @@ export default function CartModal({
         {step === 2 && (
           <form onSubmit={handleSubmitOrder} className="step-content">
             <h2 className="modal-title">📋 Customer & Event Info</h2>
-            
+
             <div className="form-fields-grid">
               <div className="form-group">
                 <label>Your Name:</label>
@@ -307,7 +338,7 @@ export default function CartModal({
           <div className="step-content text-center">
             <h2 className="modal-title">💳 Send Downpayment</h2>
             <p className="order-id-subtitle">Order Reference: <strong>{lastOrder?.id}</strong></p>
-            
+
             <div className="dp-box">
               <span>Required Downpayment:</span>
               <strong className="dp-amount-text">{peso2(dp)}</strong>
@@ -334,8 +365,12 @@ export default function CartModal({
               </button>
             </div>
 
-            <button className="btn-3d btn-primary btn-block" onClick={handleConfirmPaid}>
-              I have sent the downpayment ➔
+            <button
+              className="btn-3d btn-primary btn-block"
+              onClick={handleConfirmPaid}
+              disabled={confirming}
+            >
+              {confirming ? 'Saving...' : 'I have sent the downpayment ➔'}
             </button>
           </div>
         )}
@@ -344,7 +379,7 @@ export default function CartModal({
         {step === 4 && lastOrder && (
           <div className="step-content">
             <h2 className="modal-title text-center">🎉 Booking Confirmed!</h2>
-            
+
             <div className="inv">
               <div className="inv-head">
                 <div>
@@ -373,7 +408,7 @@ export default function CartModal({
 
               <div className="inv-divider"></div>
               <div className="inv-totals">
-                <p>Total Amount: <b>{peso2(lastOrder.total)}</b></p>
+                <p>Total Amount: <b>{peso2(orderTotal)}</b></p>
                 <p>Downpayment Sent: <b>− {peso2(dp)}</b></p>
                 <p className="balance-due">Balance Due: <strong>{peso2(bal)}</strong></p>
               </div>
